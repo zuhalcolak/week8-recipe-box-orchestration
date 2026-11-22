@@ -1,4 +1,5 @@
 """Tests for GET /shopping-list?ids=... (Task 1: shopping list)."""
+
 from fastapi.testclient import TestClient
 
 from main import app
@@ -7,7 +8,9 @@ client = TestClient(app)
 
 
 def _make(title: str, ingredients: list[str]) -> int:
-    r = client.post("/recipes", json={"title": title, "ingredients": ingredients, "tags": []})
+    r = client.post(
+        "/recipes", json={"title": title, "ingredients": ingredients, "tags": []}
+    )
     assert r.status_code == 200
     return r.json()["id"]
 

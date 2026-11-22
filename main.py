@@ -10,13 +10,14 @@ Run:
 Test:
     pytest
 """
+
 import json
 import re
 import sqlite3
 from contextlib import closing
 from pathlib import Path
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Query
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
@@ -34,14 +35,12 @@ def get_db() -> sqlite3.Connection:
 
 def init_db() -> None:
     with closing(get_db()) as conn:
-        conn.execute(
-            """CREATE TABLE IF NOT EXISTS recipes (
+        conn.execute("""CREATE TABLE IF NOT EXISTS recipes (
                 id          INTEGER PRIMARY KEY AUTOINCREMENT,
                 title       TEXT NOT NULL,
                 ingredients TEXT NOT NULL,  -- JSON list of strings
                 tags        TEXT NOT NULL   -- JSON list of strings
-            )"""
-        )
+            )""")
         conn.commit()
 
 
@@ -95,7 +94,8 @@ def list_recipes(tag: str | None = None):
     if not wanted:
         return recipes
     return [
-        rec for rec in recipes
+        rec
+        for rec in recipes
         if any(t.strip().casefold() == wanted for t in rec["tags"])
     ]
 
@@ -103,10 +103,81 @@ def list_recipes(tag: str | None = None):
 @app.get("/recipes/{recipe_id}")
 def get_recipe(recipe_id: int):
     with closing(get_db()) as conn:
-        row = conn.execute("SELECT * FROM recipes WHERE id = ?", (recipe_id,)).fetchone()
+        row = conn.execute(
+            "SELECT * FROM recipes WHERE id = ?", (recipe_id,)
+        ).fetchone()
     if row is None:
         raise HTTPException(status_code=404, detail="unknown recipe")
     return _row_to_recipe(row)
+
+
+# Parsing rule: an ingredient is scaled only when, after any leading whitespace, it
+# starts with a plain ASCII number, an integer ("200") or a dot decimal ("1.5"),
+# and the next non-space character is an ASCII letter or the end of the text.
+# The following patterns are preserved unchanged:
+#   - Fractions ("1/2 cup")
+#   - Mixed numbers ("1 1/2 cups")
+#   - Ranges ("2-3 eggs", "1-2 cups")
+#   - Text without leading number ("salt to taste")
+#   - Quantity not first ("flour, 200 g")
+LEADING_QUANTITY = re.compile(
+    r"^\s*(\d+(?:\.\d+)?)(?![eE][+-]?\d)(?![/-]\d)(?=\s*[A-Za-z]|\s*$)", re.ASCII
+)
+
+MIN_FACTOR = 0.001
+MAX_FACTOR = 1000
+
+
+def format_quantity(value: float) -> str:
+    """Format scaled quantity cleanly without floating-point noise or awkward trailing zeros."""
+    if abs(value - round(value)) < 1e-9:
+        return str(round(value))
+    if value >= 1:
+        return f"{value:.2f}".rstrip("0").rstrip(".")
+    formatted = f"{value:.4f}".rstrip("0").rstrip(".")
+    if formatted == "0" and value > 0:
+        return f"{value:.2g}"
+    return formatted
+
+
+def scale_ingredient(ingredient: str, factor: float) -> str:
+    """Scales leading numerical quantity in an ingredient string by factor."""
+    parts = ingredient.strip().split()
+    if len(parts) >= 2 and "/" in parts[1]:
+        # Mixed number: e.g. "1 1/2 cups" -> preserve unchanged
+        return ingredient
+
+    m = LEADING_QUANTITY.match(ingredient)
+    if not m:
+        return ingredient
+
+    raw_num = m.group(1)
+    val = float(raw_num)
+    scaled_val = val * factor
+    rest = ingredient[m.end() :]
+    return f"{format_quantity(scaled_val)}{rest}"
+
+
+@app.get("/recipes/{recipe_id}/scaled")
+def get_scaled_recipe(
+    recipe_id: int,
+    factor: float = Query(
+        ...,
+        ge=MIN_FACTOR,
+        le=MAX_FACTOR,
+        description="Scaling factor between 0.001 and 1000",
+    ),
+):
+    """Returns a recipe with leading ingredient quantities scaled by factor."""
+    recipe = get_recipe(recipe_id)
+    scaled_ingredients = [
+        scale_ingredient(ing, factor) for ing in recipe["ingredients"]
+    ]
+    return {
+        **recipe,
+        "ingredients": scaled_ingredients,
+        "scaling_factor": factor,
+    }
 
 
 @app.get("/shopping-list")
@@ -143,9 +214,7 @@ def shopping_list(ids: str | None = None):
                 "SELECT ingredients FROM recipes WHERE id = ?", (rid,)
             ).fetchone()
             if row is None:
-                raise HTTPException(
-                    status_code=404, detail=f"unknown recipe {rid}"
-                )
+                raise HTTPException(status_code=404, detail=f"unknown recipe {rid}")
             ingredients = json.loads(row["ingredients"])
             all_ingredients.extend(ingredients)
 
@@ -165,4 +234,3 @@ def shopping_list(ids: str | None = None):
         "ingredients": deduped,
         "count": len(deduped),
     }
-
