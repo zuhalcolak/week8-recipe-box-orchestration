@@ -80,10 +80,23 @@ def create_recipe(recipe: RecipeIn):
 
 
 @app.get("/recipes")
-def list_recipes():
+def list_recipes(tag: str | None = None):
+    """List recipes, optionally only those carrying `tag`.
+
+    Tag matching is exact per tag (no substring matches), case-insensitive and
+    ignores surrounding whitespace. A missing, empty or whitespace-only `tag`
+    means "no filter" and returns every recipe, as before.
+    """
     with closing(get_db()) as conn:
         rows = conn.execute("SELECT * FROM recipes ORDER BY id").fetchall()
-    return [_row_to_recipe(r) for r in rows]
+    recipes = [_row_to_recipe(r) for r in rows]
+    wanted = (tag or "").strip().casefold()
+    if not wanted:
+        return recipes
+    return [
+        rec for rec in recipes
+        if any(t.strip().casefold() == wanted for t in rec["tags"])
+    ]
 
 
 @app.get("/recipes/{recipe_id}")
