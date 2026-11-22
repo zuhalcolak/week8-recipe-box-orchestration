@@ -11,6 +11,7 @@ Test:
     pytest
 """
 import json
+import re
 import sqlite3
 from contextlib import closing
 from pathlib import Path
@@ -93,3 +94,62 @@ def get_recipe(recipe_id: int):
     if row is None:
         raise HTTPException(status_code=404, detail="unknown recipe")
     return _row_to_recipe(row)
+
+
+@app.get("/shopping-list")
+def shopping_list(ids: str | None = None):
+    """Merge the ingredients of the given recipes into a de-duplicated list.
+
+    `ids` is a comma-separated list of positive recipe ids, e.g. `?ids=1,2,3`.
+    Ingredients are compared case-insensitively after trimming and collapsing
+    whitespace; the first spelling seen is kept. Order follows the requested
+    recipe order, then each recipe's ingredient order. Blank ingredients are
+    dropped. Repeated ids are counted once.
+    """
+    if ids is None or not ids.strip():
+        raise HTTPException(
+            status_code=400,
+            detail="query parameter 'ids' is required, e.g. ?ids=1,2,3",
+        )
+    recipe_ids: list[int] = []
+    for part in ids.split(","):
+        token = part.strip()
+        if not (token.isascii() and token.isdigit()) or int(token) <= 0:
+            raise HTTPException(
+                status_code=400,
+                detail=f"invalid recipe id {token!r}: ids must be positive integers separated by commas",
+            )
+        rid = int(token)
+        if rid not in recipe_ids:
+            recipe_ids.append(rid)
+
+    with closing(get_db()) as conn:
+        all_ingredients = []
+        for rid in recipe_ids:
+            row = conn.execute(
+                "SELECT ingredients FROM recipes WHERE id = ?", (rid,)
+            ).fetchone()
+            if row is None:
+                raise HTTPException(
+                    status_code=404, detail=f"unknown recipe {rid}"
+                )
+            ingredients = json.loads(row["ingredients"])
+            all_ingredients.extend(ingredients)
+
+    seen = set()
+    deduped = []
+    for raw in all_ingredients:
+        collapsed = re.sub(r"\s+", " ", raw.strip())
+        if not collapsed:
+            continue
+        key = collapsed.casefold()
+        if key not in seen:
+            seen.add(key)
+            deduped.append(collapsed)
+
+    return {
+        "recipe_ids": recipe_ids,
+        "ingredients": deduped,
+        "count": len(deduped),
+    }
+
